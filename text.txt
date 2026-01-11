@@ -1,0 +1,339 @@
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, setLogLevel, doc, setDoc, increment, onSnapshot, collection, addDoc, serverTimestamp, query } from 'firebase/firestore';
+
+// --- Global Constants ---
+const MODEL_NAME_FLASH = "gemini-2.5-flash-preview-09-2025";
+const MODEL_NAME_TTS = "gemini-2.5-flash-preview-tts";
+const API_KEY = ""; 
+const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
+
+// --- Design/Color Constants ---
+const PRIMARY_COLOR = 'bg-teal-700';
+const ACCENT_COLOR_QA = 'text-sky-500 border-sky-500';
+const ACCENT_COLOR_DRUG = 'text-emerald-500 border-emerald-500';
+const ACCENT_COLOR_LAB = 'text-indigo-500 border-indigo-500';
+const ACCENT_COLOR_PREGNANCY = 'text-amber-500 border-amber-500';
+const ACCENT_COLOR_DONATION = 'text-red-500 border-red-500';
+const ACCENT_COLOR_PHARMACY = 'text-pink-500 border-pink-500';
+const ACCENT_COLOR_DOCTOR = 'text-purple-500 border-purple-500';
+const ACCENT_COLOR_LABS = 'text-blue-500 border-blue-500';
+
+const BUTTON_QA = 'bg-sky-500 hover:bg-sky-600';
+const BUTTON_DRUG = 'bg-emerald-500 hover:bg-emerald-600';
+const BUTTON_LAB = 'bg-indigo-500 hover:bg-indigo-600';
+const BUTTON_PREGNANCY = 'bg-amber-500 hover:bg-amber-600';
+
+const UI_TEXT = {
+  ku: {
+    app_title: "ناوەندی پزیشکی ڕەسەن",
+    tab_qa: "گفتوگۆ (AI)",
+    tab_drug: "دەرمان (AI)",
+    tab_lab: "فەحس (AI)",
+    tab_pregnancy: "دووگیانی",
+    tab_donation: "بەخشین",
+    tab_pharmacy: "داواکاری دەرمانخانە",
+    tab_doctors: "دکتۆرەکان",
+    tab_labs: "تاقیگەکان",
+    sub_tab_tracker: "هێڵکاری دووگیانی",
+    sub_tab_gender: "دیاریکردنی ڕەگەز",
+    placeholder_qa: "پرسیارە پزیشکییەکەت بنووسە (بۆ نموونە: نیشانەکانی پەتا چین؟)...",
+    placeholder_drug: "ناوی دەرمانەکە بنووسە (بۆ نموونە: پاراسیتامۆڵ)...",
+    date_input_label: "ئەخیر ڕۆژی سووڕی مانگانە (LMP):",
+    button_track: "شیکردنەوەی دووگیانی 🤰",
+    button_gender: "پێشبینی ڕەگەز 🧬",
+    loading: "تکایە چاوەڕێ بە...",
+    error: "هەڵەیەک ڕوویدا. تکایە لاپەڕەکە نوێ بکەرەوە.",
+    view_image: "بینینی وێنەی بارکراو",
+    input_text_prompt: "تێبینی بۆ دەرمانخانەکان:",
+    disclaimer: "تێبینی: ئەم ئەپلیکەیشنە تەنها بۆ زانیارییە و جێگرەوەی ڕاوێژی پزیشکی نییە.",
+    lab_analysis_prompt: "تکایە وێنەیەکی فەحسی پزیشکی بنێرە یان دەقەکەی دابنێ.",
+    auth_status: "ناسنامەی بەکارهێنەر:",
+    visitor_count_label: "ژمارەی سەردانیکەران:",
+    listen_btn: "گوێبگرە",
+    generating_audio: "بەرهەمهێنانی دەنگ...",
+    no_lmp_error: "تکایە ئەخیر ڕۆژی سووڕی مانگانە بنووسە.",
+    result_analysis: "شیکردنەوەی ئەنجام:",
+    non_medical_error: "تکایە تەنها پرسیاری پزیشکی بکە.",
+    coming_soon: "بەم زووانە بەردەست دەبێت...",
+    section_development: "ئەم بەشە لە ژێر پەرەپێداندایە.",
+    pharmacy_upload_prompt: "وێنەی ڕەچەتە یان دەستخەت بنێرە:",
+    pharmacy_note_placeholder: "ناونیشان و ژمارەی مۆبایل بنووسە...",
+    button_submit_order: "ناردنی داواکاری 📤",
+    success_order: "داواکارییەکەت بە سەرکەوتوویی نێردرا.",
+    error_no_image: "تکایە وێنەیەک دابنێ.",
+    latest_requests: "دوایین داواکارییەکان:",
+    no_requests: "هیچ داواکارییەک نییە.",
+    view_request_by: "ناسنامە:",
+    request_note: "تێبینی:",
+    request_time: "کات:",
+    request_status: "نێردراوە.",
+    donation_title: "بەخشین بۆ نەخۆشییە درێژخایەنەکان",
+    donation_prompt: "بەخشینی ئارەزوومەندانە یارمەتیدەرە. ژمارەی FIB:",
+    donation_fib_number: "07503055949",
+    donation_note: "تێبینی: پارەکە ڕاستەوخۆ دەگاتە دەست نەخۆشەکان.",
+    قۆناغی_یەکەم: "قۆناغی یەکەم",
+    قۆناغی_دووەم: "قۆناغی دووەم",
+    قۆناغی_سێیەم: "قۆناغی سێیەم",
+  },
+  // Ar and En parts shortened for the fix display
+};
+
+// --- Helper Functions ---
+const arrayBufferToBase64 = (buffer) => {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+const pcmToWav = (pcmData, sampleRate = 24000) => {
+    const buffer = new ArrayBuffer(44 + pcmData.byteLength);
+    const view = new DataView(buffer);
+    const writeString = (v, o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + pcmData.byteLength, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, pcmData.byteLength, true);
+    new Uint8Array(buffer, 44).set(new Uint8Array(pcmData));
+    return new Blob([buffer], { type: 'audio/wav' });
+};
+
+const callGeminiApi = async (url, payload) => {
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  if (!response.ok) throw new Error("API Failed");
+  return response.json();
+};
+
+// --- Views Configuration ---
+const VIEW_CONFIG = {
+  qa: { textKey: 'tab_qa', accent: ACCENT_COLOR_QA, button: BUTTON_QA, icon: '💬' },
+  drug: { textKey: 'tab_drug', accent: ACCENT_COLOR_DRUG, button: BUTTON_DRUG, icon: '💊' },
+  lab: { textKey: 'tab_lab', accent: ACCENT_COLOR_LAB, button: BUTTON_LAB, icon: '🔬' },
+  pregnancy: { textKey: 'tab_pregnancy', accent: ACCENT_COLOR_PREGNANCY, button: BUTTON_PREGNANCY, icon: '🤰' },
+  donation: { textKey: 'tab_donation', accent: ACCENT_COLOR_DONATION, button: 'bg-red-500 hover:bg-red-600', icon: '❤️' },
+  pharmacy: { textKey: 'tab_pharmacy', accent: ACCENT_COLOR_PHARMACY, button: 'bg-pink-500 hover:bg-pink-600', icon: '🏪' },
+  doctors: { textKey: 'tab_doctors', accent: ACCENT_COLOR_DOCTOR, button: 'bg-purple-500 hover:bg-purple-600', icon: '🩺' },
+  labs: { textKey: 'tab_labs', accent: ACCENT_COLOR_LABS, button: 'bg-blue-500 hover:bg-blue-600', icon: '🧪' },
+};
+
+// --- Sub Components ---
+const ResponseDisplay = ({ response, loading, error, t, language }) => {
+    const [audioUrl, setAudioUrl] = useState(null);
+    const [audioLoading, setAudioLoading] = useState(false);
+    const audioRef = useRef(null);
+
+    if (loading) return <div className="p-4 text-teal-600 animate-pulse">{t('loading')}</div>;
+    if (error) return <div className="p-4 text-red-500">{error}</div>;
+    if (!response) return <div className="p-4 text-gray-400 italic">{t('disclaimer')}</div>;
+
+    const speak = async () => {
+        setAudioLoading(true);
+        try {
+            const res = await callGeminiApi(`${BASE_URL}${MODEL_NAME_TTS}:generateContent?key=${API_KEY}`, {
+                contents: [{ parts: [{ text: response.substring(0, 400) }] }],
+                generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } } }
+            });
+            const data = res.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (data) {
+                const url = URL.createObjectURL(pcmToWav(Uint8Array.from(atob(data), c => c.charCodeAt(0)).buffer));
+                setAudioUrl(url);
+                setTimeout(() => audioRef.current?.play(), 100);
+            }
+        } catch (e) { console.error(e); } finally { setAudioLoading(false); }
+    };
+
+    return (
+        <div className="mt-4 p-4 bg-gray-50 border rounded-xl" dir={language === 'en' ? 'ltr' : 'rtl'}>
+            <p className="whitespace-pre-wrap text-gray-800">{response}</p>
+            <div className="mt-4 flex items-center gap-2 border-t pt-2">
+                {!audioUrl ? (
+                    <button onClick={speak} disabled={audioLoading} className="text-xs bg-indigo-100 p-2 rounded-lg">
+                        {audioLoading ? "..." : t('listen_btn')}
+                    </button>
+                ) : <audio ref={audioRef} controls src={audioUrl} className="h-8 w-full" />}
+            </div>
+        </div>
+    );
+};
+
+const ComingSoonView = ({ t, icon, titleKey, accentColor }) => (
+    <div className="p-10 flex flex-col items-center justify-center min-h-[40vh] text-center">
+        <span className={`text-6xl mb-4 ${accentColor}`}>{icon}</span>
+        <h2 className={`text-2xl font-bold ${accentColor}`}>{t('coming_soon')}</h2>
+        <p className="text-gray-500 mt-2">{t('section_development')}</p>
+    </div>
+);
+
+// --- Main App ---
+const App = () => {
+  const [currentView, setCurrentView] = useState('qa');
+  const [language, setLanguage] = useState('ku');
+  const [query, setQuery] = useState('');
+  const [response, setResponse] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [imageData, setImageData] = useState(null);
+  
+  const [db, setDb] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [visitorCount, setVisitorCount] = useState(0);
+
+  const t = useCallback((k) => (UI_TEXT[language] && UI_TEXT[language][k]) || k, [language]);
+
+  // Firebase Init
+  useEffect(() => {
+    const initFirebase = async () => {
+      try {
+        const config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        if (!config.apiKey) return;
+
+        const app = getApps().length === 0 ? initializeApp(config) : getApps()[0];
+        const auth = getAuth(app);
+        const firestore = getFirestore(app);
+        setDb(firestore);
+
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+
+        onAuthStateChanged(auth, (user) => {
+          setUserId(user ? user.uid : crypto.randomUUID());
+        });
+      } catch (e) { console.error("Firebase Error:", e); }
+    };
+    initFirebase();
+  }, []);
+
+  // Visitor Count
+  useEffect(() => {
+    if (!db || !userId) return;
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'demo-app';
+    const docRef = doc(db, "artifacts", appId, "public", "data", "app_metrics", "visitor_count");
+    
+    const unsub = onSnapshot(docRef, (s) => setVisitorCount(s.exists() ? s.data().count : 0));
+    
+    const key = `visited_${new Date().toDateString()}`;
+    if (!localStorage.getItem(key)) {
+      setDoc(docRef, { count: increment(1) }, { merge: true }).then(() => localStorage.setItem(key, 'true'));
+    }
+    return () => unsub();
+  }, [db, userId]);
+
+  const handleSearch = async (mode) => {
+    if (!query.trim() && mode !== 'lab') return;
+    setLoading(true); setError(null); setResponse(null);
+    
+    const isDrug = mode === 'drug';
+    const systemPrompt = `${t('disclaimer')} Answer ONLY medical/drug queries. If not medical, say: ${t('non_medical_error')}. Language: ${language.toUpperCase()}.`;
+    const payload = {
+        contents: [{ parts: [{ text: isDrug ? `Clinical info for: ${query}` : query }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        tools: mode === 'qa' ? [{ google_search: {} }] : []
+    };
+
+    try {
+      const res = await callGeminiApi(`${BASE_URL}${MODEL_NAME_FLASH}:generateContent?key=${API_KEY}`, payload);
+      setResponse(res.candidates?.[0]?.content?.parts?.[0]?.text || t('error'));
+    } catch (e) { setError(t('error')); } finally { setLoading(false); }
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => setImageData({ data: arrayBufferToBase64(reader.result), mimeType: file.type });
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  const renderContent = () => {
+    if (['doctors', 'labs'].includes(currentView)) return <ComingSoonView t={t} icon={VIEW_CONFIG[currentView].icon} accentColor={VIEW_CONFIG[currentView].accent} />;
+    
+    if (currentView === 'donation') return (
+        <div className="p-8 text-center bg-red-50 rounded-2xl m-4 border-2 border-red-200">
+            <h2 className="text-2xl font-bold text-red-700 mb-4">{t('donation_title')}</h2>
+            <p className="mb-4">{t('donation_prompt')}</p>
+            <div className="text-3xl font-mono bg-white p-4 rounded-xl shadow-inner inline-block border-2 border-red-500">07503055949</div>
+        </div>
+    );
+
+    return (
+        <div className="p-4 space-y-4">
+            {currentView === 'lab' && (
+                <div className="border-2 border-dashed p-6 rounded-xl bg-indigo-50 text-center">
+                    <input type="file" accept="image/*" onChange={handleFile} className="hidden" id="lab-up" />
+                    <label htmlFor="lab-up" className="cursor-pointer font-bold text-indigo-600">{t('lab_analysis_prompt')}</label>
+                    {imageData && <img src={`data:${imageData.mimeType};base64,${imageData.data}`} className="h-32 mx-auto mt-2 rounded" />}
+                </div>
+            )}
+            <textarea 
+                className="w-full p-4 border rounded-xl shadow-inner focus:ring-2 focus:ring-teal-500"
+                rows="4" value={query} onChange={(e) => setQuery(e.target.value)}
+                placeholder={t(VIEW_CONFIG[currentView].textKey)}
+                dir={language === 'en' ? 'ltr' : 'rtl'}
+            />
+            <button 
+                onClick={() => handleSearch(currentView)} disabled={loading}
+                className={`w-full py-3 rounded-xl text-white font-bold ${VIEW_CONFIG[currentView].button}`}
+            >
+                {t(VIEW_CONFIG[currentView].textKey)}
+            </button>
+            <ResponseDisplay response={response} loading={loading} error={error} t={t} language={language} />
+        </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 font-sans" dir={language === 'en' ? 'ltr' : 'rtl'}>
+      <div className="max-w-2xl mx-auto bg-white min-h-screen shadow-2xl flex flex-col">
+        <header className={`${PRIMARY_COLOR} p-6 text-white flex justify-between items-center rounded-b-3xl shadow-lg`}>
+          <h1 className="text-xl font-black">{t('app_title')}</h1>
+          <div className="flex gap-1">
+            {['ku', 'ar', 'en'].map(l => (
+                <button key={l} onClick={() => setLanguage(l)} className={`px-2 py-1 text-xs rounded-full ${language === l ? 'bg-white text-teal-700' : 'bg-teal-600'}`}>
+                    {l === 'ku' ? 'کوردی' : l === 'ar' ? 'عربي' : 'EN'}
+                </button>
+            ))}
+          </div>
+        </header>
+
+        <nav className="flex overflow-x-auto bg-teal-800 p-2 gap-2 sticky top-0 z-10">
+          {Object.keys(VIEW_CONFIG).map(v => (
+            <button 
+                key={v} onClick={() => { setCurrentView(v); setResponse(null); setQuery(''); }}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg text-xs font-bold transition-all ${currentView === v ? 'bg-white text-teal-800 scale-105' : 'text-teal-100 hover:bg-teal-700'}`}
+            >
+                {VIEW_CONFIG[v].icon} {t(VIEW_CONFIG[v].textKey)}
+            </button>
+          ))}
+        </nav>
+
+        <main className="flex-grow">{renderContent()}</main>
+
+        <footer className="p-6 bg-gray-50 border-t text-center">
+            <div className="bg-teal-100 p-3 rounded-xl inline-flex items-center gap-4">
+                <span className="text-teal-700 font-bold">{t('visitor_count_label')}</span>
+                <span className="text-2xl font-black text-indigo-600">{visitorCount}</span>
+            </div>
+            <p className="text-[10px] text-gray-400 mt-4 italic">{t('disclaimer')}</p>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+export default App;
+
